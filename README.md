@@ -1,44 +1,47 @@
 # Cobber Learn Chemistry Projects
 
-This repository contains Python projects for learning chemistry, molecular properties, data analysis, and machine learning.
+This repository contains small Python projects for chemistry, data analysis, machine learning, and model evaluation.
 
-## Error metrics project
+## Organized project layout
 
-`Hello World/MakingDataWhole /Cobberresidue/Errormetrics/Errormatrix.py` compares actual and predicted values using NumPy and scikit-learn. It calculates:
-
-- **Mean Absolute Error (MAE):** the average size of the prediction errors.
-- **Mean Squared Error (MSE):** the average squared error, which emphasizes larger mistakes.
-- **R²:** the proportion of variation explained by the predictions.
-
-For the current example, the results are:
-
-| Metric | Value |
-| --- | ---: |
-| MAE | 0.857143 |
-| MSE | 0.785714 |
-| R² | 0.821759 |
-
-The script also prints a readable observation table containing actual values, predictions, and residuals. The largest absolute error is identified automatically.
-
-## Generated visualizations
-
-The script creates two polished diagnostic plots in the same `Errormetrics` directory:
-
-- [`predicted_vs_actual.png`](Hello%20World/MakingDataWhole%20/Cobberresidue/Errormetrics/predicted_vs_actual.png) — compares predictions with actual values. The dashed green line represents perfect predictions; point size represents error magnitude and the worst prediction is red.
-- [`residual_plot.png`](Hello%20World/MakingDataWhole%20/Cobberresidue/Errormetrics/residual_plot.png) — shows residuals around the zero-error line. The largest error is highlighted in red.
-
-The script uses `Path(__file__).resolve().parent`, so the plots are saved beside the Python file regardless of the directory from which the script is run.
-
-## Running the project
-
-Install the dependencies if needed:
-
-```bash
-python -m pip install numpy matplotlib scikit-learn
+```text
+projects/
+├── chemistry/
+│   ├── alkane_boiling_points.py
+│   ├── molecule_explorer.py
+│   └── pubchem_fetcher.py
+├── data_analysis/
+│   └── making_data_whole.py
+├── model_evaluation/
+│   └── error_metrics.py
+└── hello_world/
+    └── hello_world.py
 ```
 
-Then run:
+## Projects
+
+- **Chemistry**: alkane boiling-point visualization, RDKit molecular descriptors, and PubChem lookup.
+- **Data analysis**: Titanic age prediction with a random-forest model.
+- **Model evaluation**: MAE, MSE, R², and diagnostic plots comparing actual and predicted values.
+- **Hello World**: introductory Python example.
+
+## Running the scripts
+
+Install the dependencies required by the project you want to run:
 
 ```bash
-python "Hello World/MakingDataWhole /Cobberresidue/Errormetrics/Errormatrix.py"
+python -m pip install matplotlib numpy pandas scikit-learn seaborn pubchempy rdkit
 ```
+
+Examples:
+
+```bash
+python projects/chemistry/alkane_boiling_points.py
+python projects/chemistry/molecule_explorer.py
+python projects/chemistry/pubchem_fetcher.py
+python projects/data_analysis/making_data_whole.py
+python projects/model_evaluation/error_metrics.py
+python projects/hello_world/hello_world.py
+```
+
+The original files are still present in their legacy locations so that existing links and history are not broken. The `projects/` tree is now the canonical organized layout.
