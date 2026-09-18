@@ -1,11 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 actual = np.array([2, 4, 5, 4, 5, 7, 9])
 predicted = np.array([2.5, 3.5, 4, 5, 6, 8, 8])
 
 residuals = predicted - actual
+
+# Save plots in the same directory as this script (the ErrorMetrics directory).
+output_directory = Path(__file__).resolve().parent
+output_directory.mkdir(parents=True, exist_ok=True)
 
 # Metrics calculated manually with NumPy
 mae_numpy = np.mean(np.abs(residuals))
@@ -51,7 +56,7 @@ plt.plot(
     [minimum, maximum],
     color="red",
     linestyle="--",
-    label="Ideal prediction"
+    label="Ideal prediction",
 )
 
 plt.xlabel("Actual Values")
@@ -60,4 +65,27 @@ plt.title("Predicted vs. Actual Values")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
+
+predicted_vs_actual_path = output_directory / "predicted_vs_actual.png"
+plt.savefig(predicted_vs_actual_path, dpi=300, bbox_inches="tight")
+print(f"Predicted-vs-actual plot saved to: {predicted_vs_actual_path}")
 plt.show()
+plt.close()
+
+# Residual plot: residuals should be scattered around zero without a pattern.
+plt.figure(figsize=(7, 5))
+plt.scatter(predicted, residuals, color="purple", label="Residuals")
+plt.axhline(0, color="red", linestyle="--", label="Zero residual")
+
+plt.xlabel("Predicted Values")
+plt.ylabel("Residuals (Predicted - Actual)")
+plt.title("Residual Plot")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+
+residual_plot_path = output_directory / "residual_plot.png"
+plt.savefig(residual_plot_path, dpi=300, bbox_inches="tight")
+print(f"Residual plot saved to: {residual_plot_path}")
+plt.show()
+plt.close()
