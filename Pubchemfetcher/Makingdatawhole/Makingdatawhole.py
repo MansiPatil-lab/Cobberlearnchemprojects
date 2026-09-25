@@ -1,5 +1,7 @@
 import pandas as pd
 import seaborn as sns
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 # Load the Titanic dataset
 titanic = sns.load_dataset("titanic")
@@ -44,3 +46,76 @@ new_mean_age = titanic["age"].mean()
 # Print the new mean
 print("\nNew Mean Age after imputation:")
 print(new_mean_age)
+
+# ---------------------------------------------------------
+# CORRELATION MATRIX
+# ---------------------------------------------------------
+
+# Select numeric columns for correlation analysis
+numeric_data = titanic.select_dtypes(include="number")
+
+# Create the correlation matrix
+correlation_matrix = numeric_data.corr()
+
+# Print the correlation matrix
+print("\nCorrelation Matrix:")
+print(correlation_matrix)
+
+# Find correlations with Age
+age_correlations = correlation_matrix["age"].drop("age").sort_values(
+    key=abs, ascending=False
+)
+
+# Print correlations with Age
+print("\nCorrelations with Age:")
+print(age_correlations)
+
+# Identify the two features with the strongest correlation with Age
+top_two = age_correlations.head(2)
+
+print("\nTwo features with the strongest correlation with Age:")
+print(top_two)
+
+# ---------------------------------------------------------
+# SAVE PLOTS AUTOMATICALLY
+# ---------------------------------------------------------
+
+# Create the output directory automatically
+output_directory = Path(__file__).resolve().parent
+
+# Create a correlation matrix heatmap
+plt.figure(figsize=(10, 8))
+sns.heatmap(
+    correlation_matrix,
+    annot=True,
+    cmap="coolwarm",
+    fmt=".2f"
+)
+
+plt.title("Titanic Dataset Correlation Matrix")
+plt.tight_layout()
+
+# Save the heatmap in the MakingDataWhole directory
+heatmap_path = output_directory / "correlation_matrix.png"
+plt.savefig(heatmap_path, dpi=300)
+plt.close()
+
+print(f"\nCorrelation matrix plot saved to:")
+print(heatmap_path)
+
+# Create a bar plot showing correlations with Age
+plt.figure(figsize=(8, 5))
+age_correlations.sort_values().plot(kind="barh")
+
+plt.title("Correlation of Titanic Features with Age")
+plt.xlabel("Correlation Coefficient")
+plt.ylabel("Feature")
+plt.tight_layout()
+
+# Save the Age correlation plot
+age_plot_path = output_directory / "age_correlations.png"
+plt.savefig(age_plot_path, dpi=300)
+plt.close()
+
+print(f"\nAge correlation plot saved to:")
+print(age_plot_path)
