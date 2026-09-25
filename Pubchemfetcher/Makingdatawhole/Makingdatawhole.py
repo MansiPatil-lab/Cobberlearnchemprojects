@@ -1,121 +1,92 @@
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_absolute_error
 
-# Load the Titanic dataset
+# Load Titanic dataset
 titanic = sns.load_dataset("titanic")
 
-# Display the first 10 rows of the dataset
-print("First 10 rows of the dataset:")
-print(titanic.head(10))
+# Create working copy
+df = titanic.copy()
 
-# Display the number of rows and columns
-print("\nDataset shape:")
-print(titanic.shape)
+# Encode categorical variables for KNN
+cat_cols = ["sex", "embarked", "class"]
+for col in cat_cols:
+    if col in df.columns:
+        le = LabelEncoder()
+        df[col] = df[col].fillna("unknown")
+        df[col] = le.fit_transform(df[col].astype(str))
 
-# Display the names of all columns
-print("\nColumn names:")
-print(titanic.columns)
+# Keep age and all other available features
+features = df.select_dtypes(include=["number"]).columns.tolist()
+print("Features used for KNN:", features)
 
-# Display basic information about the dataset
-print("\nDataset information:")
-titanic.info()
+# Save original age summary before imputation
+known_age_mask = df["age"].notna()
+avg_age_before = df.loc[known_age_mask, "age"].mean()
+print(f"Average age before imputation: {avg_age_before:.4f}")
 
-# Check how many values are missing in the Age column
-print("\nNumber of missing values in the Age column:")
-print(titanic["age"].isna().sum())
+# Split known and missing ages
+X_known = df[known_age_mask][features].copy()
+y_known = df.loc[known_age_mask, "age"].copy()
 
-# Calculate the mean Age using only known ages
-mean_age = titanic["age"].mean()
+# Create validation set to evaluate model
+np.random.seed(42)
+val_idx = np.random.choice(X_known.index, size=int(0.2 * len(X_known)), replace=False)
+X_train = X_known.drop(val_idx)
+X_val = X_known.loc[val_idx]
+y_train = y_known.drop(val_idx)
+y_val = y_known.loc[val_idx]
 
-# Print the mean Age
-print("\nMean Age using known ages:")
-print(mean_age)
+# KNN imputer for model training
+train_data = X_train.copy()
+train_data["age"] = y_train
 
-# Fill missing Age values with the mean
-titanic["age"] = titanic["age"].fillna(mean_age)
+val_data = X_val.copy()
+val_data["age"] = y_val
+val_data_missing = val_data.copy()
+val_data_missing["age"] = np.nan
 
-# Confirm that there are no missing Age values
-print("\nNumber of missing Age values after imputation:")
-print(titanic["age"].isna().sum())
+combined = pd.concat([train_data, val_data_missing])
 
-# Calculate the new mean after imputation
-new_mean_age = titanic["age"].mean()
+knn = KNNImputer(n_neighbors=5, weights="distance")
+knn.fit(train_data)
 
-# Print the new mean
-print("\nNew Mean Age after imputation:")
-print(new_mean_age)
+predicted = knn.transform(combined)[len(train_data):, combined.columns.get_loc("age")]
 
-# ---------------------------------------------------------
-# CORRELATION MATRIX
-# ---------------------------------------------------------
+mae = mean_absolute_error(y_val.values, predicted)
+print(f"MAE: {mae:.4f}")
 
-# Select numeric columns for correlation analysis
-numeric_data = titanic.select_dtypes(include="number")
-
-# Create the correlation matrix
-correlation_matrix = numeric_data.corr()
-
-# Print the correlation matrix
-print("\nCorrelation Matrix:")
-print(correlation_matrix)
-
-# Find correlations with Age
-age_correlations = correlation_matrix["age"].drop("age").sort_values(
-    key=abs, ascending=False
-)
-
-# Print correlations with Age
-print("\nCorrelations with Age:")
-print(age_correlations)
-
-# Identify the two features with the strongest correlation with Age
-top_two = age_correlations.head(2)
-
-print("\nTwo features with the strongest correlation with Age:")
-print(top_two)
-
-# ---------------------------------------------------------
-# SAVE PLOTS AUTOMATICALLY
-# ---------------------------------------------------------
-
-# Create the output directory automatically
-output_directory = Path(__file__).resolve().parent
-
-# Create a correlation matrix heatmap
-plt.figure(figsize=(10, 8))
-sns.heatmap(
-    correlation_matrix,
-    annot=True,
-    cmap="coolwarm",
-    fmt=".2f"
-)
-
-plt.title("Titanic Dataset Correlation Matrix")
+# Plot actual vs predicted ages
+plt.figure(figsize=(8, 6))
+plt.scatter(y_val.values, predicted, alpha=0.7)
+plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], "r--", label="Ideal")
+plt.xlabel("Actual Age")
+plt.ylabel("KNN Predicted Age")
+plt.title("Actual vs Predicted Age")
+plt.legend()
+plt.grid(True, alpha=0.3)
 plt.tight_layout()
+plt.show()
 
-# Save the heatmap in the MakingDataWhole directory
-heatmap_path = output_directory / "correlation_matrix.png"
-plt.savefig(heatmap_path, dpi=300)
-plt.close()
+# Impute all missing values in the dataset
+full_features = df[features].copy()
+full_imputed = KNNImputer(n_neighbors=5, weights="distance").fit_transform(full_features)
+full_df = pd.DataFrame(full_imputed, columns=features)
 
-print(f"\nCorrelation matrix plot saved to:")
-print(heatmap_path)
+avg_age_after = full_df["age"].mean()
+print(f"Average age after KNN imputation: {avg_age_after:.4f}")
 
-# Create a bar plot showing correlations with Age
-plt.figure(figsize=(8, 5))
-age_correlations.sort_values().plot(kind="barh")
+# Show number of imputed rows
+missing_count = df["age"].isna().sum()
+print(f"Missing age values imputed: {missing_count}")
 
-plt.title("Correlation of Titanic Features with Age")
-plt.xlabel("Correlation Coefficient")
-plt.ylabel("Feature")
-plt.tight_layout()
-
-# Save the Age correlation plot
-age_plot_path = output_directory / "age_correlations.png"
-plt.savefig(age_plot_path, dpi=300)
-plt.close()
-
-print(f"\nAge correlation plot saved to:")
-print(age_plot_path)
+# Optional: save the final imputed dataset
+output_dir = Path(__file__).resolve().parent
+output_path = output_dir / "titanic_knn_imputed.csv"
+full_df.to_csv(output_path, index=False)
+print(f"Saved imputed dataset to: {output_path}")
