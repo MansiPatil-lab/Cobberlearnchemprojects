@@ -1,108 +1,295 @@
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-import numpy as np
+
 from pathlib import Path
-from sklearn.impute import KNNImputer
-from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.metrics import mean_absolute_error
 
-# Load Titanic dataset
+# ---------------------------------------------------------
+# LOAD THE TITANIC DATASET
+# ---------------------------------------------------------
+
 titanic = sns.load_dataset("titanic")
 
-print("=" * 70)
-print("TITANIC KNN IMPUTATION MODEL")
-print("=" * 70)
+print("=" * 60)
+print("TITANIC DATASET")
+print("=" * 60)
 
-# Working copy
-df = titanic.copy()
+# Display first 10 rows
+print("\nFirst 10 rows:")
+print(titanic.head(10))
 
-# Encode categorical variables for KNN
-categorical_columns = ["sex", "embarked", "class"]
-label_encoders = {}
+# Display dataset shape
+print("\nDataset shape:")
+print(titanic.shape)
 
-for col in categorical_columns:
-    if col in df.columns:
-        le = LabelEncoder()
-        df[col] = df[col].fillna("unknown")
-        df[col] = le.fit_transform(df[col].astype(str))
-        label_encoders[col] = le
+# Display column names
+print("\nColumn names:")
+print(list(titanic.columns))
 
-# All numeric features (Age is included here)
-numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+# ---------------------------------------------------------
+# CHECK MISSING AGE VALUES
+# ---------------------------------------------------------
 
-# Split rows with known and missing ages
-known_age_mask = df["age"].notna()
-avg_age_before = df.loc[known_age_mask, "age"].mean()
+print("\n" + "=" * 60)
+print("MISSING AGE VALUES")
+print("=" * 60)
 
-print(f"Average age before KNN imputation: {avg_age_before:.4f} years")
+missing_age = titanic["age"].isna().sum()
+print(f"Missing Age values: {missing_age}")
 
-X_known = df[known_age_mask][numeric_cols].copy()
-y_known = df.loc[known_age_mask, "age"].copy()
+# Calculate the mean age using only known ages
+mean_age = titanic["age"].mean()
 
-# Validation set for MAE and plotting
-np.random.seed(42)
-val_idx = np.random.choice(X_known.index, size=int(0.2 * len(X_known)), replace=False)
+print(f"Mean Age using known values: {mean_age:.2f}")
 
-X_train = X_known.drop(val_idx)
-X_val = X_known.loc[val_idx]
-y_train = y_known.drop(val_idx)
-y_val = y_known.loc[val_idx]
+# ---------------------------------------------------------
+# CORRELATION MATRIX
+# ---------------------------------------------------------
 
-train_data = X_train.copy()
-train_data["age"] = y_train
+numeric_data = titanic.select_dtypes(include="number")
+correlation_matrix = numeric_data.corr()
 
-val_data = X_val.copy()
-val_data["age"] = y_val
-val_data_missing = val_data.copy()
-val_data_missing["age"] = np.nan
+print("\n" + "=" * 60)
+print("CORRELATION MATRIX")
+print("=" * 60)
 
-combined = pd.concat([train_data, val_data_missing])
+print(correlation_matrix)
 
-# Fit KNN model
-knn = KNNImputer(n_neighbors=5, weights="distance")
-knn.fit(train_data)
+# Find correlations with Age
+age_correlations = (
+    correlation_matrix["age"]
+    .drop("age")
+    .sort_values(key=abs, ascending=False)
+)
 
-predicted = knn.transform(combined)[len(train_data):, combined.columns.get_loc("age")]
+print("\nCorrelations with Age:")
+print(age_correlations)
 
-# Model metrics
-mae = mean_absolute_error(y_val.values, predicted)
-print(f"Mean Absolute Error (MAE): {mae:.4f} years")
+print("\nTwo features with the strongest correlation with Age:")
+print(age_correlations.head(2))
 
-# Plot actual vs predicted ages
-plt.figure(figsize=(8, 6))
-plt.scatter(y_val.values, predicted, alpha=0.7)
-plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], "r--", label="Ideal")
-plt.xlabel("Actual Age")
-plt.ylabel("KNN Predicted Age")
-plt.title("Actual vs Predicted Age")
-plt.legend()
-plt.grid(True, alpha=0.3)
+# ---------------------------------------------------------
+# SAVE CORRELATION MATRIX PLOT
+# ---------------------------------------------------------
+
+output_directory = Path(__file__).resolve().parent
+
+plt.figure(figsize=(10, 8))
+
+sns.heatmap(
+    correlation_matrix,
+    annot=True,
+    cmap="coolwarm",
+    fmt=".2f"
+)
+
+plt.title("Titanic Dataset Correlation Matrix", fontsize=16)
 plt.tight_layout()
 
-output_dir = Path(__file__).resolve().parent
-plot_path = output_dir / "actual_vs_predicted_ages.png"
-plt.savefig(plot_path, dpi=300)
+correlation_path = output_directory / "correlation_matrix.png"
+plt.savefig(correlation_path, dpi=300)
 plt.close()
-print(f"Saved plot to: {plot_path}")
 
-# Impute missing ages in the full dataset
-full_features = df[numeric_cols].copy()
-imputed_full = KNNImputer(n_neighbors=5, weights="distance").fit_transform(full_features)
-full_df = pd.DataFrame(imputed_full, columns=numeric_cols)
+print(f"\nCorrelation matrix saved to:")
+print(correlation_path)
 
-avg_age_after = full_df["age"].mean()
-print(f"Average age after KNN imputation: {avg_age_after:.4f} years")
+# ---------------------------------------------------------
+# PREPARE DATA FOR RANDOM FOREST
+# ---------------------------------------------------------
 
-# Summary
-missing_count = df["age"].isna().sum()
-print(f"Number of missing ages imputed: {missing_count}")
+print("\n" + "=" * 60)
+print("RANDOM FOREST REGRESSION")
+print("=" * 60)
 
-# Optionally save the imputed dataset
-out_csv = output_dir / "titanic_knn_imputed.csv"
-full_df.to_csv(out_csv, index=False)
-print(f"Saved imputed dataset to: {out_csv}")
+# Keep only rows where the actual Age is known
+known_age_data = titanic[titanic["age"].notna()].copy()
 
-print("=" * 70)
-print("KNN IMPUTATION COMPLETE")
-print("=" * 70)
+# Age is the target variable
+y = known_age_data["age"]
+
+# Use all other columns as predictors
+X = known_age_data.drop(columns=["age"])
+
+# Identify numeric and categorical columns
+numeric_features = X.select_dtypes(
+    include=["int64", "float64"]
+).columns.tolist()
+
+categorical_features = X.select_dtypes(
+    include=["object", "category", "bool", "str"]
+).columns.tolist()
+
+# Handle missing numeric values with the median
+numeric_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="median"))
+    ]
+)
+
+# Handle missing categorical values with the most frequent value
+categorical_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=False
+        ))
+    ]
+)
+
+# Combine the preprocessing steps
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, numeric_features),
+        ("cat", categorical_transformer, categorical_features)
+    ]
+)
+
+# Create the Random Forest model
+random_forest = RandomForestRegressor(
+    n_estimators=200,
+    random_state=42
+)
+
+# Create the complete pipeline
+model = Pipeline(
+    steps=[
+        ("preprocessor", preprocessor),
+        ("model", random_forest)
+    ]
+)
+
+# ---------------------------------------------------------
+# CROSS-VALIDATION AND MAE
+# ---------------------------------------------------------
+
+# Use cross-validation so every observation gets
+# an out-of-sample prediction
+cv = KFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+predicted_age = cross_val_predict(
+    model,
+    X,
+    y,
+    cv=cv
+)
+
+# Calculate Mean Absolute Error
+mae = mean_absolute_error(
+    y,
+    predicted_age
+)
+
+print(f"\nMean Absolute Error (MAE): {mae:.2f} years")
+
+# ---------------------------------------------------------
+# PREDICTED VS ACTUAL PLOT
+# ---------------------------------------------------------
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    y,
+    predicted_age,
+    alpha=0.6
+)
+
+# Add a perfect prediction line
+minimum = min(y.min(), predicted_age.min())
+maximum = max(y.max(), predicted_age.max())
+
+plt.plot(
+    [minimum, maximum],
+    [minimum, maximum],
+    linestyle="--"
+)
+
+plt.xlabel("Actual Age")
+plt.ylabel("Predicted Age")
+plt.title("Random Forest: Predicted Age vs. Actual Age")
+plt.tight_layout()
+
+predicted_path = output_directory / "random_forest_predicted_vs_actual.png"
+plt.savefig(predicted_path, dpi=300)
+plt.close()
+
+print("\nPredicted vs. Actual plot saved to:")
+print(predicted_path)
+
+# ---------------------------------------------------------
+# RESIDUAL PLOT
+# ---------------------------------------------------------
+
+residuals = y - predicted_age
+
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    predicted_age,
+    residuals,
+    alpha=0.6
+)
+
+# Add zero reference line
+plt.axhline(
+    y=0,
+    linestyle="--"
+)
+
+plt.xlabel("Predicted Age")
+plt.ylabel("Residual (Actual - Predicted)")
+plt.title("Random Forest Residual Plot")
+plt.tight_layout()
+
+residual_path = output_directory / "random_forest_residuals.png"
+plt.savefig(residual_path, dpi=300)
+plt.close()
+
+print("\nResidual plot saved to:")
+print(residual_path)
+
+# ---------------------------------------------------------
+# TRAIN FINAL MODEL ON ALL KNOWN AGE DATA
+# ---------------------------------------------------------
+
+model.fit(X, y)
+
+print("\nFinal Random Forest model trained successfully.")
+
+# ---------------------------------------------------------
+# PREDICT MISSING AGES
+# ---------------------------------------------------------
+
+missing_age_rows = titanic["age"].isna()
+
+if missing_age_rows.sum() > 0:
+
+    X_missing = titanic.loc[
+        missing_age_rows
+    ].drop(columns=["age"])
+
+    predicted_missing_ages = model.predict(X_missing)
+
+    titanic.loc[
+        missing_age_rows,
+        "age"
+    ] = predicted_missing_ages
+
+# Confirm that Age has no missing values
+print("\nMissing Age values after Random Forest imputation:")
+print(titanic["age"].isna().sum())
+
+print("\n" + "=" * 60)
+print("PROJECT COMPLETE")
+print("=" * 60)
