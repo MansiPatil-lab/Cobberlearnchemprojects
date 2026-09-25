@@ -23,3 +23,17 @@ titanic.info()
 # Check how many values are missing in the Age column
 print("\nNumber of missing values in the Age column:")
 print(titanic["age"].isna().sum())
+
+# Calculate the mean Age using only known (non-missing) ages
+mean_age = titanic["age"].mean()
+
+# Print the mean Age
+print("\nMean Age using known ages:")
+print(mean_age)
+
+# Fill missing Age values with the mean Age
+titanic["age"] = titanic["age"].fillna(mean_age)
+
+# Check how many missing values are left in the Age column
+print("\nNumber of missing values in the Age column after imputation:")
+print(titanic["age"].isna().sum())
