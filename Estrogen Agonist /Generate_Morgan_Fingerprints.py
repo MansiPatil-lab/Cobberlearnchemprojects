@@ -1,215 +1,273 @@
 
 from pathlib import Path
-from tkinter import Tk, filedialog
-import warnings
 
 import numpy as np
 import pandas as pd
-from rdkit import Chem, DataStructs, RDLogger
-from rdkit.Chem import rdFingerprintGenerator, Descriptors, Crippen
-from rdkit.Chem import Lipinski, rdMolDescriptors
 
-RDLogger.DisableLog("rdApp.error")
-
-# --------------------------------------------------
-# 1. SELECT THE ORIGINAL DATA FILE
-# --------------------------------------------------
-
-root = Tk()
-root.withdraw()
-
-selected_file = filedialog.askopenfilename(
-    title="Select ORIGINAL tox21-er-bla-agonist-p2.txt",
-    filetypes=[("Tox21 text files", "*.txt *.tsv")],
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    average_precision_score,
+    balanced_accuracy_score,
 )
-root.destroy()
 
-if not selected_file:
-    raise SystemExit("No file selected.")
+import joblib
 
-source = Path(selected_file)
-output_dir = Path(__file__).resolve().parent
 
-# IMPORTANT: Read the original source, not the old SMILES CSV.
-# index_col=False prevents the first field becoming the index.
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", pd.errors.ParserWarning)
-    df = pd.read_csv(
-        source,
-        sep="\t",
-        dtype=str,
-        index_col=False,
-        low_memory=False,
+# =====================================================
+# 1. FIND THE GENERATED FINGERPRINT FILE
+# =====================================================
+
+folder = Path(__file__).resolve().parent
+
+input_file = folder / "ERa_BLA_Morgan_fingerprints.csv"
+
+if not input_file.exists():
+    raise FileNotFoundError(
+        f"Cannot find:\n{input_file}\n"
+        "Run Generate_Morgan_Fingerprints.py first."
     )
 
-df.columns = (
-    df.columns.astype(str)
-    .str.replace("\ufeff", "", regex=False)
-    .str.strip()
+print("Loading fingerprint dataset...")
+
+# Load only the columns needed for this analysis
+df = pd.read_csv(
+    input_file,
+    usecols=lambda col: (
+        col in [
+            "SMILES",
+            "CANONICAL_SMILES",
+            "ASSAY_OUTCOME",
+            "LABEL_BINARY",
+            "SAMPLE_NAME",
+            "SAMPLE_DATA_TYPE",
+            "SAMPLE_ID",
+        ]
+        or col.startswith("Morgan_")
+    ),
+    low_memory=False,
 )
 
-df = df.replace(r"^\s*$", pd.NA, regex=True)
+fingerprint_cols = sorted(
+    [col for col in df.columns if col.startswith("Morgan_")]
+)
 
-required = {"SAMPLE_NAME", "SMILES", "ASSAY_OUTCOME"}
-if not required.issubset(df.columns):
+print("Dataset shape:", df.shape)
+print("Morgan fingerprint features:", len(fingerprint_cols))
+
+if len(fingerprint_cols) != 2048:
     raise ValueError(
-        "Expected assay columns were not found. Check that you "
-        "selected the original Tox21 text file.\n"
-        f"Columns found: {df.columns.tolist()}"
+        f"Expected 2048 Morgan features, found {len(fingerprint_cols)}."
     )
 
-# --------------------------------------------------
-# 2. CHECK THAT THE COLUMNS ARE NOW CORRECT
-# --------------------------------------------------
 
-print("\nPreview of source data:")
-preview_columns = [
-    c for c in ["SAMPLE_NAME", "SMILES", "TOX21_ID", "ASSAY_OUTCOME"]
-    if c in df.columns
-]
-print(df[preview_columns].head(5).to_string(index=False))
+# =====================================================
+# 2. CHECK THE ASSAY LABELS
+# =====================================================
 
-test_values = df["SMILES"].dropna().astype(str).head(100)
-valid_test = sum(
-    Chem.MolFromSmiles(s.strip()) is not None for s in test_values
+print("\nOriginal assay outcomes:")
+print(df["ASSAY_OUTCOME"].value_counts(dropna=False))
+
+if "SAMPLE_DATA_TYPE" in df.columns:
+    print("\nSample data type counts:")
+    print(df["SAMPLE_DATA_TYPE"].value_counts(dropna=False))
+
+    types = df["SAMPLE_DATA_TYPE"].dropna().str.lower()
+
+    if len(types) and types.eq("control").all():
+        print(
+            "\nWARNING: Every record is marked 'control'. "
+            "Verify with your professor or the data documentation "
+            "that this is the intended training dataset."
+        )
+
+# Ensure the target is numeric
+df["LABEL_BINARY"] = pd.to_numeric(
+    df["LABEL_BINARY"],
+    errors="coerce",
 )
 
-if len(test_values) == 0 or valid_test / len(test_values) < 0.50:
+# Keep only clear active and inactive labels
+data = df[
+    df["LABEL_BINARY"].isin([0, 1])
+].copy()
+
+data["LABEL_BINARY"] = data["LABEL_BINARY"].astype(int)
+
+print("\nBefore duplicate checks:")
+print(data["LABEL_BINARY"].value_counts().sort_index())
+
+
+# =====================================================
+# 3. CHECK DUPLICATE STRUCTURES
+# =====================================================
+
+structure_col = (
+    "CANONICAL_SMILES"
+    if "CANONICAL_SMILES" in data.columns
+    else "SMILES"
+)
+
+data = data.dropna(subset=[structure_col])
+
+# Identify structures that have both active and inactive labels.
+# Exclude these from this first model rather than guessing the label.
+label_counts = data.groupby(
+    structure_col
+)["LABEL_BINARY"].nunique()
+
+conflicting_structures = label_counts[
+    label_counts > 1
+].index
+
+print(
+    "\nStructures with conflicting labels:",
+    len(conflicting_structures),
+)
+
+data = data[
+    ~data[structure_col].isin(conflicting_structures)
+].copy()
+
+# One record per unique structure avoids having duplicates
+# split between training and test sets.
+data = data.drop_duplicates(
+    subset=structure_col,
+    keep="first",
+).reset_index(drop=True)
+
+print("\nAfter cleaning:")
+print("Unique structures:", len(data))
+print(data["LABEL_BINARY"].value_counts().sort_index())
+
+if data["LABEL_BINARY"].nunique() != 2:
     raise ValueError(
-        "The SMILES column still appears incorrect. "
-        "No fingerprints were generated. Check the preview above "
-        "and the source file's column alignment."
+        "The cleaned dataset does not contain both active and "
+        "inactive classes. Check the assay labels and source data."
     )
 
-print("\nSource rows:", len(df))
-print("Valid SMILES in initial sample:", valid_test, "/", len(test_values))
 
-# --------------------------------------------------
-# 3. VALIDATE ALL SMILES
-# --------------------------------------------------
+# =====================================================
+# 4. PREPARE INPUT FEATURES AND TARGET
+# =====================================================
 
-valid_positions = []
-molecules = []
-canonical_smiles = []
+# Morgan fingerprints are the model input.
+X = data[fingerprint_cols].to_numpy(dtype=np.uint8)
 
-for pos, smiles in enumerate(df["SMILES"]):
-    if pd.isna(smiles):
-        continue
+# Active agonist = 1; inactive = 0.
+y = data["LABEL_BINARY"].to_numpy(dtype=np.uint8)
 
-    mol = Chem.MolFromSmiles(str(smiles).strip())
-    if mol is None:
-        continue
+print("\nFeature matrix shape:", X.shape)
+print("Target shape:", y.shape)
 
-    valid_positions.append(pos)
-    molecules.append(mol)
-    canonical_smiles.append(Chem.MolToSmiles(mol, canonical=True))
 
-if not molecules:
-    raise ValueError("No valid chemical structures were found.")
+# =====================================================
+# 5. SPLIT TRAINING AND TEST DATA
+# =====================================================
 
-clean = df.iloc[valid_positions].copy().reset_index(drop=True)
-clean["CANONICAL_SMILES"] = canonical_smiles
-
-print("Valid chemical structures:", len(clean))
-print("Missing/invalid structures:", len(df) - len(clean))
-
-# --------------------------------------------------
-# 4. SAVE THE CORRECT SMILES FILE
-# --------------------------------------------------
-
-smiles_file = output_dir / "ERa_BLA_SMILES.csv"
-clean.to_csv(smiles_file, index=False)
-print("Correct SMILES file saved:", smiles_file)
-
-# --------------------------------------------------
-# 5. CREATE MORGAN FINGERPRINTS
-# --------------------------------------------------
-
-generator = rdFingerprintGenerator.GetMorganGenerator(
-    radius=2,
-    fpSize=2048,
+X_train, X_test, y_train, y_test, idx_train, idx_test = (
+    train_test_split(
+        X,
+        y,
+        np.arange(len(data)),
+        test_size=0.20,
+        random_state=42,
+        stratify=y,
+    )
 )
 
-fingerprint_arrays = []
+print("\nTraining compounds:", len(y_train))
+print("Testing compounds:", len(y_test))
 
-for mol in molecules:
-    fp = generator.GetFingerprint(mol)
-    arr = np.zeros(2048, dtype=np.uint8)
-    DataStructs.ConvertToNumpyArray(fp, arr)
-    fingerprint_arrays.append(arr)
 
-fingerprint_matrix = np.vstack(fingerprint_arrays)
+# =====================================================
+# 6. TRAIN A RANDOM FOREST CLASSIFIER
+# =====================================================
 
-fp_columns = [f"Morgan_{i:04d}" for i in range(2048)]
-fp_df = pd.DataFrame(fingerprint_matrix, columns=fp_columns)
+print("\nTraining Random Forest model...")
 
-# --------------------------------------------------
-# 6. ADD CHEMICAL DESCRIPTORS
-# --------------------------------------------------
-
-descriptors = pd.DataFrame([
-    {
-        "Molecular_Weight": Descriptors.MolWt(mol),
-        "LogP": Crippen.MolLogP(mol),
-        "TPSA": rdMolDescriptors.CalcTPSA(mol),
-        "H_Bond_Donors": Lipinski.NumHDonors(mol),
-        "H_Bond_Acceptors": Lipinski.NumHAcceptors(mol),
-        "Number_of_Rings": rdMolDescriptors.CalcNumRings(mol),
-        "Rotatable_Bonds": Lipinski.NumRotatableBonds(mol),
-    }
-    for mol in molecules
-])
-
-# --------------------------------------------------
-# 7. LABEL CLEAR ACTIVE/INACTIVE OUTCOMES
-# --------------------------------------------------
-
-outcomes = (
-    clean["ASSAY_OUTCOME"]
-    .astype("string")
-    .str.strip()
-    .str.lower()
+model = RandomForestClassifier(
+    n_estimators=100,
+    class_weight="balanced_subsample",
+    random_state=42,
+    n_jobs=-1,
 )
 
-clean["LABEL_BINARY"] = outcomes.map({
-    "active agonist": 1,
-    "inactive": 0,
-}).astype("Int64")
+model.fit(X_train, y_train)
 
-# Combine metadata, descriptors, and fingerprint bits
-result = pd.concat(
-    [
-        clean.reset_index(drop=True),
-        descriptors,
-        fp_df,
-    ],
-    axis=1,
+print("Model training completed.")
+
+
+# =====================================================
+# 7. EVALUATE THE MODEL
+# =====================================================
+
+predictions = model.predict(X_test)
+
+probabilities = model.predict_proba(X_test)[:, 1]
+
+print("\n========== MODEL RESULTS ==========")
+
+print("\nClassification report:")
+print(
+    classification_report(
+        y_test,
+        predictions,
+        labels=[0, 1],
+        target_names=["Inactive", "Active agonist"],
+        zero_division=0,
+    )
 )
 
-# --------------------------------------------------
-# 8. SAVE ALL OUTPUTS
-# --------------------------------------------------
+print(
+    "Balanced accuracy:",
+    round(balanced_accuracy_score(y_test, predictions), 3),
+)
 
-fingerprint_file = output_dir / "ERa_BLA_Morgan_fingerprints.csv"
-result.to_csv(fingerprint_file, index=False)
+print(
+    "ROC-AUC:",
+    round(roc_auc_score(y_test, probabilities), 3),
+)
 
-missing_report = pd.DataFrame({
-    "Missing_Count": df.isna().sum(),
-    "Missing_Percentage": (df.isna().mean() * 100).round(2),
-})
-missing_file = output_dir / "ERa_BLA_Missing_Data_Report.csv"
-missing_report.to_csv(missing_file)
+print(
+    "Average precision (PR-AUC summary):",
+    round(average_precision_score(y_test, probabilities), 3),
+)
 
-print("\n========== SUCCESS ==========")
-print("Original rows:", len(df))
-print("Valid structures:", len(clean))
-print("Fingerprint features:", len(fp_columns))
-print("Fingerprint dataset shape:", result.shape)
-print("Active labels:", int((clean["LABEL_BINARY"] == 1).sum()))
-print("Inactive labels:", int((clean["LABEL_BINARY"] == 0).sum()))
-print("Inconclusive/other labels:", int(clean["LABEL_BINARY"].isna().sum()))
-print("\nSaved files:")
-print(smiles_file)
-print(fingerprint_file)
-print(missing_file)
-print("\nCheck the displayed preview before using these files for modeling.")
+print("\nConfusion matrix (rows=true, columns=predicted):")
+print(confusion_matrix(y_test, predictions, labels=[0, 1]))
+
+
+# =====================================================
+# 8. SAVE THE TRAINED MODEL
+# =====================================================
+
+model_file = folder / "ERa_BLA_RandomForest_Model.joblib"
+
+joblib.dump(model, model_file)
+
+print("\nSaved model:")
+print(model_file)
+
+
+# =====================================================
+# 9. SAVE TEST PREDICTIONS
+# =====================================================
+
+test_results = data.iloc[idx_test].copy().reset_index(drop=True)
+
+test_results["TRUE_LABEL"] = y_test
+test_results["PREDICTED_LABEL"] = predictions
+test_results["PREDICTED_ACTIVE_PROBABILITY"] = probabilities
+
+predictions_file = folder / "ERa_BLA_Test_Predictions.csv"
+
+test_results.to_csv(predictions_file, index=False)
+
+print("\nSaved test predictions:")
+print(predictions_file)
+
+print("\nTRAINING AND EVALUATION FINISHED!")
