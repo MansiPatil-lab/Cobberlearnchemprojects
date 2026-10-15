@@ -3,194 +3,121 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import joblib
 
-from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
+    precision_score,
+    recall_score,
+    f1_score,
     roc_auc_score,
     average_precision_score,
     balanced_accuracy_score,
 )
 
-import joblib
-
-
-# =====================================================
-# 1. FIND THE GENERATED FINGERPRINT FILE
-# =====================================================
-
 folder = Path(__file__).resolve().parent
+file_path = folder / "ERa_BLA_Morgan_fingerprints.csv"
 
-input_file = folder / "ERa_BLA_Morgan_fingerprints.csv"
-
-if not input_file.exists():
+if not file_path.exists():
     raise FileNotFoundError(
-        f"Cannot find:\n{input_file}\n"
-        "Run Generate_Morgan_Fingerprints.py first."
+        f"Fingerprint file not found: {file_path}"
     )
 
-print("Loading fingerprint dataset...")
+print("Loading fingerprint data...")
 
-# Load only the columns needed for this analysis
+# Load only columns needed for this model
 df = pd.read_csv(
-    input_file,
+    file_path,
     usecols=lambda col: (
-        col in [
-            "SMILES",
-            "CANONICAL_SMILES",
-            "ASSAY_OUTCOME",
-            "LABEL_BINARY",
-            "SAMPLE_NAME",
-            "SAMPLE_DATA_TYPE",
-            "SAMPLE_ID",
-        ]
+        col in ["LABEL_BINARY", "CANONICAL_SMILES", "SMILES"]
         or col.startswith("Morgan_")
     ),
     low_memory=False,
 )
 
 fingerprint_cols = sorted(
-    [col for col in df.columns if col.startswith("Morgan_")]
+    col for col in df.columns
+    if col.startswith("Morgan_")
 )
-
-print("Dataset shape:", df.shape)
-print("Morgan fingerprint features:", len(fingerprint_cols))
 
 if len(fingerprint_cols) != 2048:
     raise ValueError(
-        f"Expected 2048 Morgan features, found {len(fingerprint_cols)}."
+        f"Expected 2048 fingerprint bits, found {len(fingerprint_cols)}"
     )
 
-
-# =====================================================
-# 2. CHECK THE ASSAY LABELS
-# =====================================================
-
-print("\nOriginal assay outcomes:")
-print(df["ASSAY_OUTCOME"].value_counts(dropna=False))
-
-if "SAMPLE_DATA_TYPE" in df.columns:
-    print("\nSample data type counts:")
-    print(df["SAMPLE_DATA_TYPE"].value_counts(dropna=False))
-
-    types = df["SAMPLE_DATA_TYPE"].dropna().str.lower()
-
-    if len(types) and types.eq("control").all():
-        print(
-            "\nWARNING: Every record is marked 'control'. "
-            "Verify with your professor or the data documentation "
-            "that this is the intended training dataset."
-        )
-
-# Ensure the target is numeric
 df["LABEL_BINARY"] = pd.to_numeric(
-    df["LABEL_BINARY"],
-    errors="coerce",
+    df["LABEL_BINARY"], errors="coerce"
 )
 
-# Keep only clear active and inactive labels
-data = df[
-    df["LABEL_BINARY"].isin([0, 1])
-].copy()
+# Keep only clearly labeled active and inactive records
+df = df[df["LABEL_BINARY"].isin([0, 1])].copy()
+df["LABEL_BINARY"] = df["LABEL_BINARY"].astype(int)
 
-data["LABEL_BINARY"] = data["LABEL_BINARY"].astype(int)
-
-print("\nBefore duplicate checks:")
-print(data["LABEL_BINARY"].value_counts().sort_index())
-
-
-# =====================================================
-# 3. CHECK DUPLICATE STRUCTURES
-# =====================================================
-
+# Use canonical structures to avoid duplicate structures
+# appearing in both training and test sets
 structure_col = (
     "CANONICAL_SMILES"
-    if "CANONICAL_SMILES" in data.columns
+    if "CANONICAL_SMILES" in df.columns
     else "SMILES"
 )
 
-data = data.dropna(subset=[structure_col])
+df = df.dropna(subset=[structure_col])
 
-# Identify structures that have both active and inactive labels.
-# Exclude these from this first model rather than guessing the label.
-label_counts = data.groupby(
+# Remove structures with contradictory activity labels
+label_counts = df.groupby(
     structure_col
 )["LABEL_BINARY"].nunique()
 
-conflicting_structures = label_counts[
-    label_counts > 1
-].index
+conflicts = label_counts[label_counts > 1].index
 
-print(
-    "\nStructures with conflicting labels:",
-    len(conflicting_structures),
+df = df[~df[structure_col].isin(conflicts)]
+df = df.drop_duplicates(subset=structure_col).reset_index(drop=True)
+
+if df["LABEL_BINARY"].nunique() != 2:
+    raise ValueError("Both active and inactive compounds are required.")
+
+X = df[fingerprint_cols].to_numpy(dtype=np.uint8)
+y = df["LABEL_BINARY"].to_numpy()
+
+print("Unique compounds:", len(df))
+print("Inactive:", int((y == 0).sum()))
+print("Active:", int((y == 1).sum()))
+
+# -------------------------------------------------
+# 1. Split data: 70% training, 15% validation, 15% test
+# -------------------------------------------------
+
+X_train_val, X_test, y_train_val, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.15,
+    stratify=y,
+    random_state=42,
 )
 
-data = data[
-    ~data[structure_col].isin(conflicting_structures)
-].copy()
-
-# One record per unique structure avoids having duplicates
-# split between training and test sets.
-data = data.drop_duplicates(
-    subset=structure_col,
-    keep="first",
-).reset_index(drop=True)
-
-print("\nAfter cleaning:")
-print("Unique structures:", len(data))
-print(data["LABEL_BINARY"].value_counts().sort_index())
-
-if data["LABEL_BINARY"].nunique() != 2:
-    raise ValueError(
-        "The cleaned dataset does not contain both active and "
-        "inactive classes. Check the assay labels and source data."
-    )
-
-
-# =====================================================
-# 4. PREPARE INPUT FEATURES AND TARGET
-# =====================================================
-
-# Morgan fingerprints are the model input.
-X = data[fingerprint_cols].to_numpy(dtype=np.uint8)
-
-# Active agonist = 1; inactive = 0.
-y = data["LABEL_BINARY"].to_numpy(dtype=np.uint8)
-
-print("\nFeature matrix shape:", X.shape)
-print("Target shape:", y.shape)
-
-
-# =====================================================
-# 5. SPLIT TRAINING AND TEST DATA
-# =====================================================
-
-X_train, X_test, y_train, y_test, idx_train, idx_test = (
-    train_test_split(
-        X,
-        y,
-        np.arange(len(data)),
-        test_size=0.20,
-        random_state=42,
-        stratify=y,
-    )
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train_val,
+    y_train_val,
+    test_size=0.1764705882,
+    stratify=y_train_val,
+    random_state=42,
 )
 
 print("\nTraining compounds:", len(y_train))
-print("Testing compounds:", len(y_test))
+print("Validation compounds:", len(y_val))
+print("Test compounds:", len(y_test))
 
+# -------------------------------------------------
+# 2. Train the Random Forest on training data only
+# -------------------------------------------------
 
-# =====================================================
-# 6. TRAIN A RANDOM FOREST CLASSIFIER
-# =====================================================
-
-print("\nTraining Random Forest model...")
+print("\nTraining model...")
 
 model = RandomForestClassifier(
-    n_estimators=100,
+    n_estimators=200,
     class_weight="balanced_subsample",
     random_state=42,
     n_jobs=-1,
@@ -198,76 +125,98 @@ model = RandomForestClassifier(
 
 model.fit(X_train, y_train)
 
-print("Model training completed.")
+# -------------------------------------------------
+# 3. Select threshold using validation data
+# -------------------------------------------------
 
+val_probs = model.predict_proba(X_val)[:, 1]
 
-# =====================================================
-# 7. EVALUATE THE MODEL
-# =====================================================
+thresholds = np.arange(0.05, 0.96, 0.01)
+threshold_results = []
 
-predictions = model.predict(X_test)
+for threshold in thresholds:
+    val_preds = (val_probs >= threshold).astype(int)
 
-probabilities = model.predict_proba(X_test)[:, 1]
+    threshold_results.append({
+        "threshold": threshold,
+        "precision": precision_score(
+            y_val, val_preds, zero_division=0
+        ),
+        "recall": recall_score(
+            y_val, val_preds, zero_division=0
+        ),
+        "f1": f1_score(
+            y_val, val_preds, zero_division=0
+        ),
+    })
 
-print("\n========== MODEL RESULTS ==========")
+threshold_df = pd.DataFrame(threshold_results)
+
+# Select the threshold with the best validation F1-score
+best_row = threshold_df.loc[threshold_df["f1"].idxmax()]
+best_threshold = float(best_row["threshold"])
+
+threshold_df.to_csv(
+    folder / "ERa_BLA_Threshold_Comparison.csv",
+    index=False,
+)
+
+print("\nBEST VALIDATION THRESHOLD")
+print("Threshold:", round(best_threshold, 2))
+print("Validation precision:", round(best_row["precision"], 3))
+print("Validation recall:", round(best_row["recall"], 3))
+print("Validation F1:", round(best_row["f1"], 3))
+
+# -------------------------------------------------
+# 4. Evaluate only once on the untouched test set
+# -------------------------------------------------
+
+test_probs = model.predict_proba(X_test)[:, 1]
+test_preds = (test_probs >= best_threshold).astype(int)
+
+print("\nFINAL TEST RESULTS")
+print("Threshold:", round(best_threshold, 2))
 
 print("\nClassification report:")
-print(
-    classification_report(
-        y_test,
-        predictions,
-        labels=[0, 1],
-        target_names=["Inactive", "Active agonist"],
-        zero_division=0,
-    )
+print(classification_report(
+    y_test,
+    test_preds,
+    labels=[0, 1],
+    target_names=["Inactive", "Active agonist"],
+    zero_division=0,
+))
+
+print("Balanced accuracy:",
+      round(balanced_accuracy_score(y_test, test_preds), 3))
+
+print("ROC-AUC:",
+      round(roc_auc_score(y_test, test_probs), 3))
+
+print("Average precision:",
+      round(average_precision_score(y_test, test_probs), 3))
+
+print("\nConfusion matrix:")
+print(confusion_matrix(y_test, test_preds, labels=[0, 1]))
+
+# -------------------------------------------------
+# 5. Save the new model and results
+# -------------------------------------------------
+
+joblib.dump(
+    model,
+    folder / "ERa_BLA_Improved_Model.joblib",
 )
 
-print(
-    "Balanced accuracy:",
-    round(balanced_accuracy_score(y_test, predictions), 3),
+results = pd.DataFrame({
+    "TRUE_LABEL": y_test,
+    "PREDICTED_LABEL": test_preds,
+    "PREDICTED_ACTIVE_PROBABILITY": test_probs,
+})
+
+results.to_csv(
+    folder / "ERa_BLA_Improved_Test_Predictions.csv",
+    index=False,
 )
 
-print(
-    "ROC-AUC:",
-    round(roc_auc_score(y_test, probabilities), 3),
-)
-
-print(
-    "Average precision (PR-AUC summary):",
-    round(average_precision_score(y_test, probabilities), 3),
-)
-
-print("\nConfusion matrix (rows=true, columns=predicted):")
-print(confusion_matrix(y_test, predictions, labels=[0, 1]))
-
-
-# =====================================================
-# 8. SAVE THE TRAINED MODEL
-# =====================================================
-
-model_file = folder / "ERa_BLA_RandomForest_Model.joblib"
-
-joblib.dump(model, model_file)
-
-print("\nSaved model:")
-print(model_file)
-
-
-# =====================================================
-# 9. SAVE TEST PREDICTIONS
-# =====================================================
-
-test_results = data.iloc[idx_test].copy().reset_index(drop=True)
-
-test_results["TRUE_LABEL"] = y_test
-test_results["PREDICTED_LABEL"] = predictions
-test_results["PREDICTED_ACTIVE_PROBABILITY"] = probabilities
-
-predictions_file = folder / "ERa_BLA_Test_Predictions.csv"
-
-test_results.to_csv(predictions_file, index=False)
-
-print("\nSaved test predictions:")
-print(predictions_file)
-
-print("\nTRAINING AND EVALUATION FINISHED!")
+print("\nSUCCESS! Improved-model analysis completed.")
+print("Model and test predictions saved.")
