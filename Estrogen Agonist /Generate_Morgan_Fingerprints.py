@@ -1,53 +1,70 @@
 
 from pathlib import Path
-
+import subprocess
 import pandas as pd
+
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors, Crippen, Lipinski
 from rdkit.Chem import rdMolDescriptors
 
 RDLogger.DisableLog("rdApp.error")
 
+# 1. Find your project folder
 folder = Path(__file__).resolve().parent
+
+# 2. Open the Morgan fingerprint dataset
 input_file = folder / "ERa_BLA_Morgan_fingerprints.csv"
 
 if not input_file.exists():
     raise FileNotFoundError(
-        f"File not found: {input_file}"
+        f"Cannot find the file:\n{input_file}"
     )
 
-print("Loading chemical structures...")
+print("Loading your estrogen agonist data...")
 
-# Read only the columns we need, not all 2,048 fingerprint bits
 df = pd.read_csv(
     input_file,
-    usecols=lambda c: c in {
+    usecols=lambda col: col in [
         "SMILES",
         "CANONICAL_SMILES",
-        "LABEL_BINARY",
-        "ASSAY_OUTCOME",
         "SAMPLE_NAME",
-    },
+        "ASSAY_OUTCOME",
+        "LABEL_BINARY",
+    ],
     low_memory=False,
 )
+
+# 3. Prepare active and inactive labels
+if "LABEL_BINARY" not in df.columns:
+    outcomes = (
+        df["ASSAY_OUTCOME"]
+        .astype("string")
+        .str.strip()
+        .str.lower()
+    )
+
+    df["LABEL_BINARY"] = outcomes.map({
+        "active agonist": 1,
+        "inactive": 0,
+    })
 
 df["LABEL_BINARY"] = pd.to_numeric(
     df["LABEL_BINARY"], errors="coerce"
 )
 
-# Compare only clear active and inactive labels
 df = df[df["LABEL_BINARY"].isin([0, 1])].copy()
-df["LABEL_BINARY"] = df["LABEL_BINARY"].astype(int)
 
+# 4. Select a structure column
 structure_col = (
     "CANONICAL_SMILES"
     if "CANONICAL_SMILES" in df.columns
     else "SMILES"
 )
 
+# Remove missing structures
 df = df.dropna(subset=[structure_col])
 
-# Remove structures with contradictory labels
+# Remove structures with conflicting activity labels
 label_counts = df.groupby(
     structure_col
 )["LABEL_BINARY"].nunique()
@@ -55,32 +72,31 @@ label_counts = df.groupby(
 conflicts = label_counts[label_counts > 1].index
 df = df[~df[structure_col].isin(conflicts)].copy()
 
-# Retain one row per unique chemical structure
+# Keep one row per unique molecular structure
 df = df.drop_duplicates(
     subset=structure_col
 ).reset_index(drop=True)
 
-print("Unique labeled structures:", len(df))
+print("Compounds to analyze:", len(df))
 
-# Calculate chemical descriptors from valid SMILES
-records = []
+# 5. Calculate chemical features
+results = []
 
-for _, row in df.iterrows():
-    smiles = row[structure_col]
-    mol = Chem.MolFromSmiles(str(smiles))
+for i, row in df.iterrows():
+    mol = Chem.MolFromSmiles(str(row[structure_col]))
 
     if mol is None:
         continue
 
-    records.append({
-        "Chemical": row.get("SAMPLE_NAME", ""),
+    label = int(row["LABEL_BINARY"])
+
+    results.append({
+        "Chemical_Name": row.get("SAMPLE_NAME", ""),
         "SMILES": row["SMILES"],
-        "Activity_Label": int(row["LABEL_BINARY"]),
         "Activity": (
-            "Active agonist"
-            if row["LABEL_BINARY"] == 1
-            else "Inactive"
+            "Active agonist" if label == 1 else "Inactive"
         ),
+        "LABEL_BINARY": label,
         "Molecular_Weight": Descriptors.MolWt(mol),
         "LogP": Crippen.MolLogP(mol),
         "TPSA": rdMolDescriptors.CalcTPSA(mol),
@@ -90,17 +106,19 @@ for _, row in df.iterrows():
         "Rotatable_Bonds": Lipinski.NumRotatableBonds(mol),
     })
 
-features = pd.DataFrame(records)
+features = pd.DataFrame(results)
 
 if features.empty:
-    raise ValueError("No valid structures were available for comparison.")
+    raise ValueError(
+        "No valid chemical structures were found."
+    )
 
-# Save descriptors for individual chemicals
+# 6. Save information for each chemical
 features_file = folder / "ERa_BLA_Chemical_Features.csv"
 features.to_csv(features_file, index=False)
 
-# Compare active and inactive groups
-descriptor_cols = [
+# 7. Compare active and inactive chemicals
+properties = [
     "Molecular_Weight",
     "LogP",
     "TPSA",
@@ -110,18 +128,30 @@ descriptor_cols = [
     "Rotatable_Bonds",
 ]
 
-summary = features.groupby("Activity")[
-    descriptor_cols
-].agg(["count", "mean", "median"])
+comparison = features.groupby("Activity")[properties].agg(
+    ["count", "mean", "median"]
+)
 
-summary_file = folder / "ERa_BLA_Active_Inactive_Comparison.csv"
-summary.to_csv(summary_file)
+comparison_file = (
+    folder / "ERa_BLA_Active_Inactive_Comparison.csv"
+)
 
-print("\nACTIVE VS INACTIVE CHEMICAL FEATURES")
-print(summary.round(3).to_string())
+comparison.to_csv(comparison_file)
+
+# 8. Print the comparison directly in PyCharm
+print("\n========== ACTIVE VS INACTIVE ==========")
+print(comparison.round(3).to_string())
 
 print("\nFiles saved:")
 print(features_file)
-print(summary_file)
+print(comparison_file)
 
-print("\nAnalysis completed successfully!")
+# 9. Automatically open the comparison CSV on your Mac
+print("\nOpening the comparison table...")
+
+subprocess.run(
+    ["open", str(comparison_file)],
+    check=False,
+)
+
+print("\nDONE! Check the table that opened on your Mac.")
