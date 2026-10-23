@@ -5,114 +5,219 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+import subprocess
 
-# Step 1: Create the FrozenLake environment
+# STEP 1: Create FrozenLake environment
 env = gym.make("FrozenLake-v1")
 
-# Step 2: Create the Q-table
 num_states = env.observation_space.n
 num_actions = env.action_space.n
 
+# STEP 2: Create the Q-table
 q_table = np.zeros((num_states, num_actions))
 
 print("Initial Q-Table:")
 print(q_table)
+print("Q-Table Shape:", q_table.shape)
 
-# Step 3: Set training parameters
-episodes = 20000
+# STEP 3: Training settings
+episodes = 50000
 learning_rate = 0.1
 discount_factor = 0.99
+epsilon = 1.0
+min_epsilon = 0.05
+epsilon_decay = 0.9999
 
-rewards = []
-successful_episodes = 0
-
-# Step 4: Train the agent
+# STEP 4: Train the agent
 for episode in range(episodes):
 
-    # Reset the environment
     state, info = env.reset()
     done = False
-    total_reward = 0
 
-    # Steps within each episode
     while not done:
 
-        # Choose a random action
-        action = env.action_space.sample()
+        # Explore or use learned knowledge
+        if np.random.random() < epsilon:
+            action = env.action_space.sample()
+        else:
+            action = int(np.argmax(q_table[state]))
 
-        # Perform the action
-        new_state, reward, terminated, truncated, info = env.step(
-            action
+        # Take action
+        new_state, reward, terminated, truncated, info = (
+            env.step(action)
         )
 
-        # Calculate the Bellman target
-        if terminated:
+        done = terminated or truncated
+
+        # Bellman equation
+        if done:
             target = reward
         else:
             target = reward + discount_factor * np.max(
                 q_table[new_state]
             )
 
-        # Update the Q-value
-        old_value = q_table[state, action]
-
-        new_value = old_value + learning_rate * (
-            target - old_value
+        # Update Q-table
+        q_table[state, action] += learning_rate * (
+            target - q_table[state, action]
         )
 
-        q_table[state, action] = new_value
-
-        # Move to the new state
         state = new_state
 
-        # Record reward
-        total_reward += reward
+    epsilon = max(min_epsilon, epsilon * epsilon_decay)
 
-        # End if goal/hole reached or time limit exceeded
-        done = terminated or truncated
-
-    rewards.append(total_reward)
-
-    if total_reward > 0:
-        successful_episodes += 1
-
-# Step 5: Print the trained Q-table
 print("\nTraining Completed!")
 
-print("\nUpdated Q-Table:")
+# STEP 5: Print final Q-table
 np.set_printoptions(precision=4, suppress=True)
+print("\nFinal Q-Table:")
 print(q_table)
 
-print("\nQ-Table Shape:", q_table.shape)
-print("Total Episodes:", episodes)
-print("Successful Episodes:", successful_episodes)
+# STEP 6: Create learned policy with arrows
+arrows = ["←", "↓", "→", "↑"]
 
-# Step 6: Create a training graph
-window = 500
-moving_average = np.convolve(
-    rewards,
-    np.ones(window) / window,
-    mode="valid"
+lake = env.unwrapped.desc
+rows, cols = lake.shape
+
+def create_policy(q_table):
+    policy = []
+
+    for row in range(rows):
+        policy_row = []
+
+        for col in range(cols):
+            state = row * cols + col
+            cell = lake[row, col].decode("utf-8")
+
+            if cell == "H":
+                symbol = "H"
+            elif cell == "G":
+                symbol = "G"
+            elif np.allclose(q_table[state], 0):
+                symbol = "?"
+            else:
+                best_action = np.argmax(q_table[state])
+                symbol = arrows[best_action]
+
+            policy_row.append(symbol)
+
+        policy.append(policy_row)
+
+    return policy
+
+policy = create_policy(q_table)
+
+print("\nLearned Policy Grid:")
+
+for row in policy:
+    print("  ".join(row))
+
+# STEP 7: Test agent for 100 episodes
+test_episodes = 100
+successes = 0
+
+for episode in range(test_episodes):
+
+    state, info = env.reset()
+    done = False
+
+    while not done:
+
+        # No exploration during testing
+        action = int(np.argmax(q_table[state]))
+
+        new_state, reward, terminated, truncated, info = (
+            env.step(action)
+        )
+
+        state = new_state
+        done = terminated or truncated
+
+        if reward == 1:
+            successes += 1
+
+# STEP 8: Calculate success rate
+success_rate = (successes / test_episodes) * 100
+
+print("\nTEST RESULTS")
+print("Test Episodes:", test_episodes)
+print("Successful Episodes:", successes)
+print(f"Success Rate: {success_rate:.2f}%")
+
+if success_rate > 70:
+    print("Good learning!")
+elif success_rate < 30:
+    print("The agent needs more training.")
+else:
+    print("The agent shows some learning.")
+
+# STEP 9: Create a policy image
+fig, ax = plt.subplots(figsize=(6, 6))
+
+colors = {
+    "S": "lightblue",
+    "F": "white",
+    "H": "lightgray",
+    "G": "lightgreen"
+}
+
+for row in range(rows):
+    for col in range(cols):
+
+        cell = lake[row, col].decode("utf-8")
+
+        rect = plt.Rectangle(
+            (col, row),
+            1, 1,
+            facecolor=colors[cell],
+            edgecolor="black"
+        )
+
+        ax.add_patch(rect)
+
+        symbol = policy[row][col]
+
+        if cell == "S":
+            symbol = "S\n" + symbol
+
+        ax.text(
+            col + 0.5,
+            row + 0.5,
+            symbol,
+            ha="center",
+            va="center",
+            fontsize=20
+        )
+
+ax.set_xlim(0, cols)
+ax.set_ylim(rows, 0)
+ax.set_aspect("equal")
+ax.axis("off")
+
+ax.set_title(
+    f"FrozenLake Learned Policy\n"
+    f"Success Rate: {success_rate:.1f}%"
 )
 
-plt.figure(figsize=(9, 5))
-plt.plot(moving_average)
-plt.title("FrozenLake Q-Learning Training")
-plt.xlabel("Episode (500-episode window)")
-plt.ylabel("Average Reward")
-plt.grid(True)
 plt.tight_layout()
 
-# Save the graph
+# STEP 10: Save image
 output_file = (
     Path(__file__).resolve().parent
-    / "FrozenLake_Training.png"
+    / "FrozenLake_Learned_Policy.png"
 )
 
-plt.savefig(output_file, dpi=300)
-plt.close()
+fig.savefig(
+    str(output_file),
+    format="png",
+    dpi=300
+)
 
-print("\nGraph saved successfully!")
+plt.close(fig)
+env.close()
+
+print("\nImage saved successfully!")
 print("Saved to:", output_file)
 
-env.close()
+# Automatically open image on Mac
+subprocess.run(["open", str(output_file)])
